@@ -1,0 +1,23 @@
+# build output
+/bin/
+/dist/
+
+# local cluster state
+/tmp/
+*.log
+keystone-data/
+/var/lib/keystone/
+
+# test and profiling output
+*.test
+*.out
+coverage.*
+*.prof
+cpu.pprof
+mem.pprof
+
+# editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
