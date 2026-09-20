@@ -1,0 +1,124 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.22"
+
+jobs:
+  lint:
+    name: format and vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+      - run: go vet ./...
+      - name: no third-party dependencies
+        # Keystone is standard-library only, on purpose. A dependency
+        # appearing in go.mod should be a deliberate, reviewed decision, not
+        # something that slips in with a convenience import.
+        run: |
+          if grep -qE '^\s*require' go.mod; then
+            echo "go.mod gained a dependency; this project is stdlib-only by design"
+            cat go.mod
+            exit 1
+          fi
+
+  test:
+    name: unit and integration
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.22", "1.23"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - name: test with the race detector
+        run: go test ./... -race -count=1 -short -timeout 10m
+
+  chaos:
+    name: chaos and linearizability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # The chaos suite injects partitions, isolation and packet loss under
+      # live load and checks the recorded history for linearizability
+      # violations. It is run on every build rather than nightly because the
+      # checker is linear, not exponential: commit timestamps are log indexes,
+      # so the serialization order is directly observable.
+      - run: go test ./test/ -race -count=1 -v -timeout 15m
+
+  repeat:
+    name: repeated runs (flake detection)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # Consensus bugs are timing-dependent and a single green run proves
+      # little. Repeating the consensus and transaction suites catches the
+      # races that only show up one run in ten.
+      - run: go test ./internal/raft/ ./internal/txn/ -race -count=5 -timeout 15m
+
+  build:
+    name: build binaries
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: make build
+      - name: smoke test the binaries
+        run: |
+          ./bin/keystoned -version
+          ./bin/keystonectl -version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: keystone-binaries
+          path: bin/
+          retention-days: 7
+
+  docker:
+    name: container image
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: false
+          tags: keystone:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

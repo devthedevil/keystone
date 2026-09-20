@@ -1,0 +1,61 @@
+# A three-replica Keystone cluster.
+#
+#   docker compose -f deploy/docker-compose.yml up --build
+#   docker compose -f deploy/docker-compose.yml exec n1 keystonectl status
+#
+# Client ports are published on 9001-9003. Peer ports are deliberately not
+# published: replication traffic belongs on an internal network.
+
+name: keystone
+
+x-common: &common
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+  restart: unless-stopped
+  # Give each replica time to drain: stop client traffic, hand off leadership,
+  # wait for a successor, then stop replicating.
+  stop_grace_period: 30s
+  networks: [keystone]
+  environment: &env
+    KEYSTONE_PEERS: "n1=http://n1:8081,n2=http://n2:8081,n3=http://n3:8081"
+    KEYSTONE_CLIENT_PEERS: "n1=http://n1:8080,n2=http://n2:8080,n3=http://n3:8080"
+    KEYSTONE_ADMIN_TOKEN: "change-me"
+    KEYSTONE_LOG_LEVEL: "info"
+    KEYSTONE_LOG_FORMAT: "json"
+
+services:
+  n1:
+    <<: *common
+    container_name: keystone-n1
+    environment:
+      <<: *env
+      KEYSTONE_ID: n1
+    ports: ["9001:8080"]
+    volumes: ["n1-data:/var/lib/keystone"]
+
+  n2:
+    <<: *common
+    container_name: keystone-n2
+    environment:
+      <<: *env
+      KEYSTONE_ID: n2
+    ports: ["9002:8080"]
+    volumes: ["n2-data:/var/lib/keystone"]
+
+  n3:
+    <<: *common
+    container_name: keystone-n3
+    environment:
+      <<: *env
+      KEYSTONE_ID: n3
+    ports: ["9003:8080"]
+    volumes: ["n3-data:/var/lib/keystone"]
+
+networks:
+  keystone:
+
+volumes:
+  n1-data:
+  n2-data:
+  n3-data:
